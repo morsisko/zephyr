@@ -77,7 +77,7 @@ static int spi_bitbang_transceive(const struct device *dev,
 	int rc;
 	const struct gpio_dt_spec *miso = NULL;
 	const struct gpio_dt_spec *mosi = NULL;
-	gpio_flags_t mosi_flags = GPIO_OUTPUT_INACTIVE;
+	bool half_duplex = false;
 
 	rc = spi_bitbang_configure(info, data, spi_cfg);
 	if (rc < 0) {
@@ -90,32 +90,26 @@ static int spi_bitbang_transceive(const struct device *dev,
 			return -EINVAL;
 		}
 
-		if (tx_bufs && rx_bufs) {
-			LOG_ERR("Both RX and TX specified in half duplex mode");
-			return -EINVAL;
-		} else if (tx_bufs && !rx_bufs) {
-			/* TX mode */
-			mosi = &info->mosi_gpio;
-		} else if (!tx_bufs && rx_bufs) {
-			/* RX mode */
-			mosi_flags = GPIO_INPUT;
-			miso = &info->mosi_gpio;
-		}
+		mosi = &info->mosi_gpio;
+		miso = &info->mosi_gpio;
+		half_duplex = true;
 	} else {
 		if (info->mosi_gpio.port) {
 			mosi = &info->mosi_gpio;
+			rc = gpio_pin_configure_dt(&info->mosi_gpio, GPIO_OUTPUT_INACTIVE);
+			if (rc < 0) {
+				LOG_ERR("Couldn't configure MOSI pin: %d", rc);
+				return rc;
+			}
 		}
 
 		if (info->miso_gpio.port) {
 			miso = &info->miso_gpio;
-		}
-	}
-
-	if (info->mosi_gpio.port) {
-		rc = gpio_pin_configure_dt(&info->mosi_gpio, mosi_flags);
-		if (rc < 0) {
-			LOG_ERR("Couldn't configure MOSI pin: %d", rc);
-			return rc;
+			rc = gpio_pin_configure_dt(&info->miso_gpio, GPIO_INPUT);
+			if (rc < 0) {
+				LOG_ERR("Couldn't configure MISO pin: %d", rc);
+				return rc;
+			}
 		}
 	}
 
@@ -147,6 +141,13 @@ static int spi_bitbang_transceive(const struct device *dev,
 	const uint32_t wait_us = data->wait_us;
 
 	while (spi_context_tx_buf_on(ctx) || spi_context_rx_buf_on(ctx)) {
+
+		if (half_duplex && (spi_context_tx_buf_on(ctx) && spi_context_rx_buf_on(ctx))) {
+			LOG_ERR("A dummy frame is required for the SPI transaction. Transmission "
+				"and reception cannot occur simultaneously in half-duplex mode.");
+			return -EINVAL;
+		}
+
 		uint16_t w = 0;
 
 		if (ctx->tx_len) {
@@ -167,6 +168,16 @@ static int spi_bitbang_transceive(const struct device *dev,
 
 		if (miso && spi_context_rx_buf_on(ctx)) {
 			do_read = true;
+		}
+
+		if (half_duplex) {
+			gpio_flags_t mosi_flags = do_read ? GPIO_INPUT : GPIO_OUTPUT_INACTIVE;
+
+			rc = gpio_pin_configure_dt(mosi, mosi_flags);
+			if (rc < 0) {
+				LOG_ERR("Couldn't configure MOSI pin: %d", rc);
+				return rc;
+			}
 		}
 
 		while (i < data->bits) {
